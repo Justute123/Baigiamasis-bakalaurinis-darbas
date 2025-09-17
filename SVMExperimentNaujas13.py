@@ -380,12 +380,6 @@ def calculateSVM(XTest, yTest, XTrain, yTrain, channelNumber, seizures, patients
     # scale train features
     XTrainScaled = scaler.fit_transform(XTrain)
 
-    # PCA (keep 95% variance)
-    #pca = PCA(n_components=0.95, random_state=42)
-    #XTrain_pca = pca.fit_transform(XTrain_scaled)
-    #print("Original feature dim:", X_all.shape[1])
-    #print("Reduced feature dim (PCA):", XTrain_pca.shape[1])
-
     # Train SVM
     svc_clf.fit(XTrainScaled, yTrain)
 
