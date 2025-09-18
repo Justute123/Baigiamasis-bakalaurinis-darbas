@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import mne 
 from pyedflib import highlevel
 import pyedflib as plib
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC 
 from imblearn.over_sampling import SMOTE
 from collections import Counter
@@ -105,9 +106,60 @@ def calculateAmplitude(Coeff):
     findHalfWAveAmplitudeCoeff = findHalfWAveAmplitudes(CoeffHalfWaveSegment)
 
     AEpochBackground = AEpoch(len(findHalfWAveAmplitudeCoeff),findHalfWAveAmplitudeCoeff)
-    return AEpochBackground
-    
 
+    return AEpochBackground
+
+# kai backgroup signalas yra 120 sec o pertrauk 60 sec, tai tada bus 20 langu kanale
+
+def splitToWindowsChosenSizeForAmplitudeBackgroundCalculating(channelNumber, frequency, signals, duration, gap):
+    start = 0
+    end = int(duration * frequency)
+
+    # how many windows fit in the signal
+    windowNr = int(3600 / (duration+gap))
+
+    windows = [[None for _ in range(channelNumber)] for _ in range(windowNr)]
+    indexes = []
+
+    for w in range(windowNr):
+        for ch in range(channelNumber):
+            windows[w][ch] = signals[ch, start:end]
+
+        # save (start, end) indices in samples
+        indexes.append((start, end))
+
+        # move to next window: add duration + gap
+        backgroundDuration = int((duration + gap) * frequency)
+        start = start + backgroundDuration
+        end = start + int(duration * frequency)
+
+    return windows, indexes, windowNr
+
+
+def ABackgroundInDurationSignals(channelNumber, windows):
+        listWindow=[]
+        backgroundAmplitudes=[]
+        background=[]
+        for w in range(len(windows)):
+            for ch in range(channelNumber):
+                    cA5, cD5, cD4, cD3, cD2, cD1 = dwt_coeffs(windows[w][ch])
+            
+                    listWindow.append((cD3, cD4, cD5))
+                    D3 = listWindow[ch][0]
+                    D4 = listWindow[ch][1]
+                    D5 = listWindow[ch][2]
+
+                    AEpochD3Background = calculateAmplitude(D3)
+                    AEpochD4Background = calculateAmplitude(D4)
+                    AEpochD5Background = calculateAmplitude(D5)
+                    
+
+                    backgroundAmplitudes=[AEpochD3Background,AEpochD4Background,AEpochD5Background]
+                    background.append(backgroundAmplitudes)
+
+        return background
+
+    
 #viso signalo pilno amplitudziu apdorojimas, straipsnyje paimta kas 120 sec background, o mes meginsime bendrini paimti, nes kartais gali tu atitraukimu neuztekti hjeigu signalas trumpesnis
 # todel eisime universalesniu budu
 def ABackgroundInAllSignals(channelNumber, signals):
@@ -150,17 +202,31 @@ def fluctuationIndex(coeff, N):
 
 #FEATURE CALCULATION
 #gaunu suma 1698 koeficientu (D3,D4,D5), KUR D3 966, D4 486 d5 246  viename lange viename kanale, turiu 23 kanalus, o langu gaunasi 120 
-def featureCalculation(signals, window, frequency, channelNumber):
+def featureCalculation(signals, windows, frequency, channelNumber,seconds):
     list = []
     features = []
-    background = ABackgroundInAllSignals(channelNumber,signals)
-    for w in range(len(window)):
+
+    backgroundWindows, indexes, windowNr = splitToWindowsChosenSizeForAmplitudeBackgroundCalculating(channelNumber, frequency,signals, duration=120, gap=60)
+
+    #backgroundWindows = np.array(backgroundWindows)   
+    #print("Background windows shape :", backgroundWindows.shape) #(20, 23, 30720) # 20 langu, 23 kanalai ir 30720 verciu per kanala ir per lanag
+    back = ABackgroundInDurationSignals(channelNumber, backgroundWindows)
+    backValues = np.array(back)
+    print("background amplitude values shape: ", backValues.shape) #(460,3) 20 langu 23 kanalai ir per viena kanala ir langa 3 koeficienta
+    backValues = backValues.reshape(windowNr, channelNumber, 3)
+    index = 0
+   
+    # I BUDAS IMTI BACKGROUND PER VISA 3600 SEC SIGNALA
+    #background amplitude through all windows
+    #background = ABackgroundInAllSignals(channelNumber,signals)
+    for w in range(len(windows)):
+        time = w*seconds
         listWindow = []
         listWindow2=[]
         listWindowAll=[]
         for ch in range(channelNumber):
             # Wavelet decomposition
-            cA5, cD5, cD4, cD3, cD2, cD1 = dwt_coeffs(window[w][ch])
+            cA5, cD5, cD4, cD3, cD2, cD1 = dwt_coeffs(windows[w][ch])
             listWindow.append((cD3, cD4, cD5))
             listWindowAll.append((cD1,cD2, cD3, cD4, cD5))
 
@@ -189,11 +255,38 @@ def featureCalculation(signals, window, frequency, channelNumber):
             AEpochD4 = calculateAmplitude(D4)
             AEpochD5 = calculateAmplitude(D5)
 
-        
-            ABackgroundD3 = background[ch][0]
-            ABackgroundD4 = background[ch][1]
-            ABackgroundD5 = background[ch][2]
+            #background amplitude througha all windows and signals        
+            #ABackgroundD3 = background[ch][0]
+            #ABackgroundD4 = background[ch][1]
+            #ABackgroundD5 = background[ch][2]
 
+            #II BUDAS kadanghgi vienas langas apima 4 sec tai [0,120 sec] backgroyund verte galios iki pat 180 sec
+
+            
+            if time > 0 and time % 180 == 0:
+              index = index + 1
+                 #koreguoti
+              index = min(index, windowNr - 1) 
+
+            # III BUDAS nuo o iki 120 epochai galios [0,120], o nuo 120 epochos iki 300 galios [180, 300], nuo 300 iki 460 galios [360, 480]
+
+            #if time > 120:
+             #    index = int((time - 120) / 180) + 1
+              #   index = min(index, windowNr - 1) 
+
+          
+            #if time < 120:
+            #    index = 0
+            #else:
+            #    index = int((time - 120) / 180) + 1
+            #    index = min(index, windowNr - 1)
+
+
+          
+            ABackgroundD3 = backValues[index][ch][0]
+            ABackgroundD4 = backValues[index][ch][1]
+            ABackgroundD5 = backValues[index][ch][2]
+           
             ARelativeD3 = AEpochD3/ABackgroundD3
             ARelativeD4 = AEpochD4/ABackgroundD4
             ARelativeD5 = AEpochD5/ABackgroundD5
@@ -398,14 +491,6 @@ def calculateSVM(XTest, yTest, XTrain, yTrain, channelNumber, seizures, patients
         XTestPerPatient = XTest[i]          # shape: (120*23, 12)
         YTestPerPatient = yTest[i]          # shape: (120,)
 
-        #win_i = len(YTestPerPatient)
-        #print("===================")
-        #print("win: ", win_i)
-        #print("===================")
-        #ch_i = XTestPerPatient.shape[0] // win_i  # infer channel count
-        #print("===================")
-        #print("ch_i: ", ch_i)
-        #print("===================")
 
         # Apply scaling for X test
         XTestScaled = scaler.transform(XTestPerPatient)
@@ -413,15 +498,13 @@ def calculateSVM(XTest, yTest, XTrain, yTrain, channelNumber, seizures, patients
 
         # predict
         yPredictedBeforeReshaping = svc_clf.predict(XTestScaled)
-        print(yPredictedBeforeReshaping)
 
         # reshape to (windows, channels)
         Ymatrix = yPredictedBeforeReshaping.reshape(windowNumber, channelNumber)
-        print(Ymatrix)
 
         # postprocess
         yPredictedAfterReshaping = predictedYPostprocessing(Ymatrix)
-        print(yPredictedAfterReshaping)
+
 
         # evaluation
         print("Patient: ", i)
@@ -620,7 +703,7 @@ def Main(seconds):
             # split to windows
             window = splitToWindows(signals, channelNumber, windowNumber, oneWindowSignalsNumber)
             # calculate all features in all segments
-            featureVectorALLSegments = featureCalculation(signals, window, frequency,channelNumber)
+            featureVectorALLSegments = featureCalculation(signals, window, frequency,channelNumber,seconds)
             print(featureVectorALLSegments.shape) #(2760=120*23,12)
             XTest.append(featureVectorALLSegments)
             # fill y vector with seizures
@@ -646,7 +729,7 @@ def Main(seconds):
             print("y segments of seizures: ", ySeizures)
             seizuresWindowsNumber = int(np.sum(y))
             totalSeizuresWindows = totalSeizuresWindows + seizuresWindowsNumber
-            featureVectorSeizureSegments =  featureCalculation(signals, XSeizures, frequency,channelNumber)
+            featureVectorSeizureSegments =  featureCalculation(signals, XSeizures, frequency,channelNumber,seconds)
             XTrain.append(featureVectorSeizureSegments)
             yTrain.append(np.repeat(ySeizures, channelNumber))
             print("============")
@@ -656,7 +739,7 @@ def Main(seconds):
 
             # GET X AND Y VALUES OF NON SEIZURES AND ALSO USING THIS SIGNALS OF X CALCULATE FEATURES
             XRandomNonseizure, yRandomNonSeizure = getXAndYAtSpecialIdexesWhenNONSeiziure(windowNumber, seizure_intervals, seconds,signals, channelNumber,oneWindowSignalsNumber, seizuresWindowsNumber)
-            featureVectorNonSeizureSegments =  featureCalculation(signals, XRandomNonseizure, frequency,channelNumber)
+            featureVectorNonSeizureSegments =  featureCalculation(signals, XRandomNonseizure, frequency,channelNumber,seconds)
             print("X segments of non seizure: ",  XRandomNonseizure,)
             print("y segments of non seizure : ", yRandomNonSeizure)
             NonseizuresWindowsNumber = int(np.sum(yRandomNonSeizure==0))
