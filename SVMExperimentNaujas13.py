@@ -13,6 +13,7 @@ from pywt import wavedec
 from sklearn.model_selection import train_test_split
 import math
 from os import listdir
+from sklearn.model_selection import GridSearchCV 
 from os.path import isfile, join
 import glob
 import ntpath
@@ -376,6 +377,8 @@ def getXAndYAtSpecialIdexesWhenSeiziure(windowNumber, seizure_intervals, seconds
 # kiek ivyko priepoliu kiek is 1 buvo nuejimu i 0
 def CalculateNumberOfSeizures(y):
 
+    y = np.array(y).flatten()   
+
     difList = np.diff(y)
 
     count=0
@@ -414,16 +417,44 @@ def CalculateNumberOfSeizures(y):
 def predictedYPostprocessing(Ymatrix):
 
     yPredictedWindow = []
-    for eil in Ymatrix:
-            #jei bent 12 kanalu toje eiluteje pasikartojo priepolis tada vadinasi tikrai buvo priepolis
-            if eil.sum() >= 2:
+    for i in range (len(Ymatrix)):
+            #jei bent 2 kanalu toje eiluteje pasikartojo priepolis tada vadinasi tikrai buvo priepolis
+            if Ymatrix[i].sum() >= 2:
                 yPredictedWindow.append(1)
             else:
                 yPredictedWindow.append(0)
 
     yPredictedWindow = np.array(yPredictedWindow)
+
+
+#paskui jeigu kanale vienas priepolis tikriname kas buvo gretimuose segmententuose, jeigu nors vienas gretimas tada irgi uzskaitom kaip priepoli
+# eisim iki priespaskutinio, nes tam, kad neislipti is ribu, nes ziuresim jo gretima kaimyna
+    lengthTillSecondToLastElement = len(Ymatrix)-1
+    for z in range (lengthTillSecondToLastElement):
+            if Ymatrix[z].sum() >= 1 and ((z > 0 and yPredictedWindow[z-1] == 1) or yPredictedWindow[z+1] == 1):
+                yPredictedWindow[z] = 1
+
     return yPredictedWindow
 
+
+def collarTechnique(yPredictedWindow, collar):
+    for i in range(len(yPredictedWindow) - 1):
+        if yPredictedWindow[i] == 1 and  (i > 0 and yPredictedWindow[i-1] == 0):
+            end = i
+            # what if index is negative
+            if i - collar > 0: 
+                start = i - collar
+            else:
+                start = 0
+
+            yPredictedWindow[start:end] = 1
+
+        if yPredictedWindow[i] == 1 and yPredictedWindow[i+1] == 0:
+            start = i
+            end = (i + collar) + 1
+            yPredictedWindow[start:end] = 1
+    return yPredictedWindow
+    
 
 #SVM and accurancy and so on
 #https://stackoverflow.com/questions/52217151/how-can-we-give-explicit-test-data-and-train-data-to-svm-instead-of-using-train
@@ -436,7 +467,7 @@ def calculateMetrics(TP, FP, FN, TN):
         sensitivity = TP / (TP + FN)  
         
     else: 
-         sensitivity = 0.0
+         sensitivity = np.nan
     if (TN + FP) > 0:
 
         specificity = TN / (TN + FP)
@@ -448,33 +479,67 @@ def calculateMetrics(TP, FP, FN, TN):
 
     else: 
          accurancy = 0.0
-    if (TP + FP) > 0:
+    if TP > 0:
     
         precision = TP / (TP + FP) 
     else: 
-         precision = 0.0
+         precision = np.nan
     if (FP + TN) > 0: 
          
         fpr = FP / (FP + TN)  
     else: 
-         fpr= 0.0
-
+         fpr= np.nan
     return sensitivity, specificity, accurancy, precision, fpr
+
+
+
+
+def MAFCalculation(signal, totalWindowNumber, channelNumber, windowSize):
+
+    windowsRecreatedSize = totalWindowNumber - windowSize + 1
+    columns = channelNumber
+  
+    result = [[None for _ in range(channelNumber)] for _ in range(windowsRecreatedSize)]
+
+    for w in range(windowsRecreatedSize):     
+        for ch in range(channelNumber):      
+            start = w
+            end = w + windowSize
+            window = signal[start:end, ch]
+            result[w][ch] = np.mean(window)
+
+    return result
+
 
 
 def calculateSVM(XTest, yTest, XTrain, yTrain, channelNumber, seizures, patientsNumber, windowNumber, train_nr):
 
     scaler = StandardScaler()
 
-    svc_clf = SVC(C=10, gamma='scale', kernel='rbf', class_weight="balanced")
+    #svc_clf = SVC(C=10, gamma='scale', kernel='rbf', class_weight="balanced")
 
     np.set_printoptions(threshold=np.inf)
 
     # scale train features
+    # https://www.geeksforgeeks.org/machine-learning/svm-hyperparameter-tuning-using-gridsearchcv-ml/
     XTrainScaled = scaler.fit_transform(XTrain)
+   
+
+    param_grid = {'C': [0.1, 1, 10, 100, 1000], 
+			'gamma': ['scale', 'auto', 1, 0.1, 0.01, 0.001, 0.0001], 
+			'kernel': ['rbf','linear']} 
+
+    grid = GridSearchCV(SVC(), param_grid, refit = True, verbose = 3, n_jobs=-1, scoring='f1') 
+ 
+    grid.fit(XTrainScaled, yTrain)
+    #https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.GridSearchCV.html
+
+    print("Best parameters:", grid.best_params_)
+    print("Best precision score:", grid.best_score_)
+    svc_clf = grid.best_estimator_
 
     # Train SVM
-    svc_clf.fit(XTrainScaled, yTrain)
+    #svc_clf.fit(XTrainScaled, yTrain)
 
     trainAccurancy = svc_clf.score(XTrainScaled, yTrain)
     print("SVM TRAINING ACCURANCY: ", trainAccurancy)
@@ -486,6 +551,12 @@ def calculateSVM(XTest, yTest, XTrain, yTrain, channelNumber, seizures, patients
     prec = [] 
     fpriii=[]
 
+    sumTN = 0
+    sumFN = 0
+    sumFP = 0
+    sumTP = 0
+
+
     for i in range(patientsNumber):
         
         XTestPerPatient = XTest[i]          # shape: (120*23, 12)
@@ -496,14 +567,24 @@ def calculateSVM(XTest, yTest, XTrain, yTrain, channelNumber, seizures, patients
         XTestScaled = scaler.transform(XTestPerPatient)
         #X_test_i_pca = pca.transform(X_test_i_scaled)
 
+        rawSignal = svc_clf.decision_function(XTestScaled)
+        rawMatrix = rawSignal.reshape(windowNumber,channelNumber)
+        MAF = MAFCalculation(rawMatrix, windowNumber, channelNumber, windowSize=3)
+
+    
+        yX = (np.array(MAF) >= 0).astype(int)
+        y = predictedYPostprocessing(yX)
+        print(y.shape)
+        yPredictedAfterReshaping = collarTechnique(y, collar = 2)
+
         # predict
-        yPredictedBeforeReshaping = svc_clf.predict(XTestScaled)
+        #yPredictedBeforeReshaping = svc_clf.predict(XTestScaled)
 
         # reshape to (windows, channels)
-        Ymatrix = yPredictedBeforeReshaping.reshape(windowNumber, channelNumber)
+        #Ymatrix = yPredictedBeforeReshaping.reshape(windowNumber, channelNumber)
 
         # postprocess
-        yPredictedAfterReshaping = predictedYPostprocessing(Ymatrix)
+        #yPredictedAfterReshaping = predictedYPostprocessing(Ymatrix)
 
 
         # evaluation
@@ -511,21 +592,36 @@ def calculateSVM(XTest, yTest, XTrain, yTrain, channelNumber, seizures, patients
         print("positives in test y:", CalculateNumberOfSeizures(YTestPerPatient))
         print("positives in predicted y:", CalculateNumberOfSeizures(yPredictedAfterReshaping))
 
-        testAccurancy = accuracy_score(YTestPerPatient, yPredictedAfterReshaping)
+        testAccurancy = accuracy_score(YTestPerPatient[:len(yPredictedAfterReshaping)], yPredictedAfterReshaping)
         print("Test accuracy of SVM:", round(testAccurancy,2))
 
-        cmTest = confusion_matrix(YTestPerPatient, yPredictedAfterReshaping)
+        cmTest = confusion_matrix(YTestPerPatient[:len(yPredictedAfterReshaping)], yPredictedAfterReshaping, labels=[0, 1])
         print("Test confusion matrix:\n", cmTest)
+
          
         TN = cmTest[0,0]
         FP = cmTest[0,1]
         FN = cmTest[1,0]
         TP = cmTest[1,1]
+
+        sumFN = sumFN + FN
+        sumTN = sumTN + TN
+        sumFP = sumFP + FP
+        sumTP = sumTP + TP
+
         sensitivity, specificity, accurancy, precision, fpr = calculateMetrics(TP,FP,FN,TN)
         print("Test accuracy of SVM:", round(accurancy, 2))
-        print("Test sensitivity of SVM:", round(sensitivity, 2))
+        if sensitivity is not None:
+            print("Test sensitivity of SVM:", round(sensitivity, 2))
+        else:
+            print("Test sensitivity is none")
         print("Test specificity of SVM:", round(specificity, 2))
-        print("Test precision of SVM:", round(precision, 2))
+
+        if precision is not None:
+             print("Test precision of SVM:", round(precision, 2))
+        else:
+            print("Test precision is none")
+
         print("Test fpr of SVM:", round(fpr, 2))
 
         sens.append(sensitivity)
@@ -535,15 +631,19 @@ def calculateSVM(XTest, yTest, XTrain, yTrain, channelNumber, seizures, patients
         fpriii.append(fpr)
 
     averageAccurancy = np.mean(acc)
-    averagesensitivity = np.mean(sens)
+    averagesensitivity = np.nanmean(sens)
     averagespecificity = np.mean(spec)
-    avearageprecision = np.mean(prec)
+    avearageprecision = np.nanmean(prec)
     averagefpr = np.mean(fpriii)
     print("Test average accuracy of SVM:", round(averageAccurancy,2))
     print("Test average sensitivity of SVM:", round(averagesensitivity,2))
     print("Test average specificity of SVM:", round(averagespecificity,2))
     print("Test average precision of SVM:", round(avearageprecision,2))
     print("Test average fpr of SVM:", round(averagefpr,2))
+
+    sumedConfusionMatrix = np.matrix([[sumTN, sumFP],
+                  [sumFN, sumTP]])
+    print("summed confusion matrix: ", sumedConfusionMatrix)
     
 
          
